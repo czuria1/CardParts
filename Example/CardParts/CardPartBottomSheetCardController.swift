@@ -59,6 +59,7 @@ class CardPartBottomSheetCardController: CardPartsViewController, CardPartsBotto
         bottomSheet.didDismiss = sheetDidDismiss(_:)
         bottomSheet.didShow = sheetDidShow
         bottomSheet.didChangeHeight = sheetDidChangeHeight(_:)
+        bottomSheet.sheetPositions = [.instrinsic, .half, .fixed(600), .fullscreen]
         return bottomSheet
     }()
     

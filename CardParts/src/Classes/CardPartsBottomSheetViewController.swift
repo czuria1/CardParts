@@ -8,6 +8,14 @@
 import Foundation
 import UIKit
 
+public enum CardPartsBottomSheetSizes {
+    case instrinsic
+    case fixed(CGFloat)
+    case half
+    case marginFromTop(CGFloat)
+    case fullscreen
+}
+
 // MARK: Bottom sheet
 public class CardPartsBottomSheetViewController: UIViewController {
     
@@ -132,12 +140,19 @@ public class CardPartsBottomSheetViewController: UIViewController {
     /// Whether or not users can use the accessibility escape gesture to dismiss the bottom sheet. Default is true. It is not recommended that you override this unless you are using the bottom sheet in sticky mode or otherwise disabling dismissal or providing another way for VoiceOver users to dismiss.
     public var allowsAccessibilityGestureToDismiss: Bool = true
     
+    public var sheetPositions: [CardPartsBottomSheetSizes] = [.instrinsic]
+    
+    private var sortedSheetPositions: [CardPartsBottomSheetSizes] = []
+    
+    public private(set) var currentSize: CardPartsBottomSheetSizes = .instrinsic
+    
     // MARK: Private variables
     private var bottomSheetContainerVC: UIViewController = UIViewController()
     private var bottomSheetHeight: CGFloat = 0
     private var darkOverlay: UIView = UIView()
     private var prevTouchHeight: CGFloat = 0
     private var bottomSheetTopConstraint: NSLayoutConstraint!
+    private var contentVCTopConstraint: NSLayoutConstraint!
     private var viewTopConstraint: NSLayoutConstraint!
     private var _contentHeight: CGFloat = 0
     private var keyboardHeight: CGFloat? = nil
@@ -278,6 +293,8 @@ public class CardPartsBottomSheetViewController: UIViewController {
         if self.shouldListenToKeyboardNotifications, let keyboardHeight = self.keyboardHeight {
             bottomSheetHeight += keyboardHeight
         }
+        
+        sortSheetPositions()
     }
     
     /// Sets up dark overlay.
@@ -351,8 +368,18 @@ public class CardPartsBottomSheetViewController: UIViewController {
         guard let contentVC = contentVC else { return }
         bottomSheetContainerVC.add(contentVC)
         
+        var additionalPadding: CGFloat = 0
+        switch handlePosition {
+        case .inside(let topPadding):
+            additionalPadding = topPadding
+        default:
+            break
+        }
+        
+        contentVCTopConstraint = contentVC.view.topAnchor.constraint(equalTo: self.bottomSheetContainerVC.view.topAnchor, constant: self.handleVC.handleHeight + additionalPadding)
+        contentVCTopConstraint.isActive = true
+        
         contentVC.view.layout {
-            $0.top == self.bottomSheetContainerVC.view.topAnchor
             $0.leading == self.bottomSheetContainerVC.view.leadingAnchor
             $0.trailing == self.bottomSheetContainerVC.view.trailingAnchor
         }
@@ -463,18 +490,81 @@ extension CardPartsBottomSheetViewController: UIGestureRecognizerDelegate {
             prevTouchHeight = touchHeight
             self.view.layoutIfNeeded()
         case .cancelled, .ended, .failed:
-            // if only gone down a little, keep it up; otherwise dismiss
-            if -self.bottomSheetTopConstraint.constant > bottomSheetHeight * dragHeightRatioToDismiss && recognizer.velocity(in: self.view).y < dragVelocityToDismiss {
-                UIView.animate(withDuration: snapBackAnimationDuration, delay: 0, usingSpringWithDamping: 1.0, initialSpringVelocity: 1.0, options: animationOptions, animations: {
+            guard -self.bottomSheetTopConstraint.constant > bottomSheetHeight * dragHeightRatioToDismiss && recognizer.velocity(in: self.view).y < dragVelocityToDismiss else {
+                dismissBottomSheet(.swipeDown)
+                return
+            }
+            
+            var safeAreaPadding: CGFloat = 0
+            
+            let point = recognizer.translation(in: recognizer.view?.superview)
+            var newSize = self.currentSize
+            if point.y < 0 {
+                // move bottom sheet to the next larger size
+                newSize = self.sortedSheetPositions.last ?? self.currentSize
+                self.sortedSheetPositions.reversed().forEach {
+                    if self.bottomSheetHeight < self.height(for: $0) {
+                        newSize = $0
+                    }
+                }
+                switch newSize {
+                case .fullscreen:
+                    if #available(iOS 11.0, *) {
+                        safeAreaPadding += self.view.safeAreaInsets.top
+                    } else {
+                        break
+                    }
+                default:
+                    break
+                }
+                print("☝️ move to next larger size \(newSize), from: \(self.bottomSheetHeight)")
+            } else {
+                // move bottom sheet to the next smaller size
+                newSize = self.sortedSheetPositions.first ?? self.currentSize
+                self.sortedSheetPositions.forEach {
+                    if self.bottomSheetHeight > self.height(for: $0) {
+                        newSize = $0
+                    }
+                }
+                switch handlePosition {
+                    case .inside(let topPadding):
+                        safeAreaPadding += topPadding
+                    default:
+                        break
+                }
+                
+                switch self.currentSize {
+                    case .fullscreen:
+                        if #available(iOS 11.0, *) {
+                            safeAreaPadding += self.handleVC.handleHeight
+                        } else {
+                            break
+                        }
+                    default:
+                        break
+                }
+                print("👇 move to next smaller size \(newSize), from: \(self.bottomSheetHeight)")
+            }
+            self.currentSize = newSize
+            
+            bottomSheetHeight = self.height(for: newSize)
+            UIView.animate(
+                withDuration: snapBackAnimationDuration,
+                delay: 0,
+                usingSpringWithDamping: 1.0,
+                initialSpringVelocity: 1.0,
+                options: animationOptions,
+                animations: {
+                    if #available(iOS 11.0, *) {
+                        self.contentVCTopConstraint.constant = safeAreaPadding
+                    } else {
+                        // Fallback on earlier versions
+                    }
                     self.bottomSheetTopConstraint.constant = -self.bottomSheetHeight
                     self.didChangeHeight?(-self.bottomSheetTopConstraint.constant)
                     self.darkOverlay.alpha = self.overlayMaxAlpha
                     self.view.layoutIfNeeded()
                 }, completion: nil)
-                
-            } else {
-                dismissBottomSheet(.swipeDown)
-            }
         default:
             break
         }
@@ -520,6 +610,36 @@ extension CardPartsBottomSheetViewController: UIGestureRecognizerDelegate {
         self.contentVC?.view.gestureRecognizers?.forEach { self.contentVC?.view.removeGestureRecognizer($0) }
         self.bottomSheetContainerVC.view.gestureRecognizers?.forEach { self.bottomSheetContainerVC.view.removeGestureRecognizer($0) }
     }
+    
+    private func sortSheetPositions() {
+        var contentSizes: [(CardPartsBottomSheetSizes, CGFloat)] = sheetPositions.map {
+            return ($0, self.height(for: $0))
+        }
+        contentSizes.sort { $0.1 < $1.1 }
+        self.sortedSheetPositions = contentSizes.map { size, _ in size }
+    }
+    
+    private func height(for size: CardPartsBottomSheetSizes?) -> CGFloat {
+        guard let size = size else { return 0 }
+        let contentVCHeight: CGFloat
+        let fullscreenHeight: CGFloat
+        fullscreenHeight = self.view.bounds.height
+        switch size {
+            case .instrinsic:
+                contentVCHeight = contentHeight ?? 0
+            case .fixed(let height):
+                contentVCHeight = height
+            case .half:
+                contentVCHeight = fullscreenHeight / 2.0
+            case .fullscreen:
+                contentVCHeight = fullscreenHeight
+            case .marginFromTop(let margin):
+                contentVCHeight = fullscreenHeight - margin
+        }
+        
+        return min(fullscreenHeight, contentVCHeight)
+    }
+
 }
 
 // MARK: Convenience functions to set up properties
